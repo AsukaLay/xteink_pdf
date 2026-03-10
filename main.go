@@ -23,39 +23,48 @@ type Task struct {
 }
 
 func main() {
-	// 获取当前目录下的所有 .pdf 文件
-	pdfs, err := filepath.Glob("*.pdf")
+	var inputFiles []string
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		log.Fatal("查找 PDF 文件失败:", err)
+		log.Fatal("读取当前目录失败:", err)
 	}
 
-	if len(pdfs) == 0 {
-		fmt.Println("当前目录下没有找到 PDF 文件。")
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if ext == ".pdf" || ext == ".mobi" || ext == ".azw3" {
+			// 跳过已经是 _output 结尾的输出文件，避免重复处理
+			if strings.HasSuffix(strings.ToLower(e.Name()), "_output.pdf") {
+				continue
+			}
+			inputFiles = append(inputFiles, e.Name())
+		}
+	}
+
+	if len(inputFiles) == 0 {
+		fmt.Println("当前目录下没有找到可处理的文件 (PDF/MOBI/AZW3)。")
 		return
 	}
 
-	for _, inputPDF := range pdfs {
-		// 跳过已经是 _output.pdf 结尾的输出文件，避免重复处理
-		if strings.HasSuffix(inputPDF, "_output.pdf") {
-			continue
-		}
+	for _, inputFile := range inputFiles {
+		// 构建输出文件名，统一输出 PDF
+		ext := filepath.Ext(inputFile)
+		base := strings.TrimSuffix(inputFile, ext)
+		outputPDF := base + "_output.pdf"
 
-		// 构建输出文件名
-		ext := filepath.Ext(inputPDF)
-		base := strings.TrimSuffix(inputPDF, ext)
-		outputPDF := base + "_output" + ext
-
-		fmt.Printf("\n========== 开始处理: %s ==========\n", inputPDF)
-		processSinglePDF(inputPDF, outputPDF)
+		fmt.Printf("\n========== 开始处理: %s ==========\n", inputFile)
+		processSingleFile(inputFile, outputPDF)
 	}
 
 	// 处理完毕后清理临时目录
 	os.RemoveAll("temp_raw")
 	os.RemoveAll("temp_cropped")
-	fmt.Printf("\n========== 所有 PDF 处理完毕 ==========\n")
+	fmt.Printf("\n========== 所有文件处理完毕 ==========\n")
 }
 
-func processSinglePDF(inputPDF, outputPDF string) {
+func processSingleFile(inputFile, outputPDF string) {
 	tempRaw := "temp_raw"         // 存放提取出的原始图
 	tempCropped := "temp_cropped" // 存放切分后的图
 
@@ -66,10 +75,19 @@ func processSinglePDF(inputPDF, outputPDF string) {
 	os.MkdirAll(tempCropped, 0755)
 
 	// 1. 提取图片
-	fmt.Println("Step 1: 正在从 PDF 提取图片...")
-	if err := api.ExtractImagesFile(inputPDF, tempRaw, nil, nil); err != nil {
-		log.Printf("提取失败跳过此文件: %v\n", err)
-		return
+	ext := strings.ToLower(filepath.Ext(inputFile))
+	fmt.Printf("Step 1: 正在从 %s 提取图片...\n", strings.ToUpper(ext[1:]))
+
+	if ext == ".pdf" {
+		if err := api.ExtractImagesFile(inputFile, tempRaw, nil, nil); err != nil {
+			log.Printf("提取失败跳过此文件: %v\n", err)
+			return
+		}
+	} else if ext == ".mobi" || ext == ".azw3" {
+		if err := extractMobiImages(inputFile, tempRaw); err != nil {
+			log.Printf("提取失败跳过此文件: %v\n", err)
+			return
+		}
 	}
 
 	// 2. 获取并排序提取的文件
