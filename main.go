@@ -143,15 +143,36 @@ func processMangaPage(t Task, outDir string) {
 			continue
 		}
 
-		rect := image.Rect(bounds.Min.X, lastY, bounds.Max.X, y)
-		cropImg := imaging.Crop(src, rect)
+		// 如果切出来的图片非常长（高度大于宽度的2倍或指定阈值），
+		// 会导致在阅读器上被缩小，从而字体太小，因此强行切成两半
+		width := bounds.Dx()
+		if height > width*2 {
+			halfY := lastY + height/2
 
-		// 命名格式：原页码索引(4位)_切块索引(2位).jpg
-		outPath := filepath.Join(outDir, fmt.Sprintf("%04d_%02d.jpg", t.Index, partIdx))
-		imaging.Save(cropImg, outPath)
+			// 保存上半部分
+			rect1 := image.Rect(bounds.Min.X, lastY, bounds.Max.X, halfY)
+			cropImg1 := imaging.Crop(src, rect1)
+			outPath1 := filepath.Join(outDir, fmt.Sprintf("%04d_%02d.jpg", t.Index, partIdx))
+			imaging.Save(cropImg1, outPath1)
+			partIdx++
+
+			// 保存下半部分
+			rect2 := image.Rect(bounds.Min.X, halfY, bounds.Max.X, y)
+			cropImg2 := imaging.Crop(src, rect2)
+			outPath2 := filepath.Join(outDir, fmt.Sprintf("%04d_%02d.jpg", t.Index, partIdx))
+			imaging.Save(cropImg2, outPath2)
+			partIdx++
+		} else {
+			rect := image.Rect(bounds.Min.X, lastY, bounds.Max.X, y)
+			cropImg := imaging.Crop(src, rect)
+
+			// 命名格式：原页码索引(4位)_切块索引(2位).jpg
+			outPath := filepath.Join(outDir, fmt.Sprintf("%04d_%02d.jpg", t.Index, partIdx))
+			imaging.Save(cropImg, outPath)
+			partIdx++
+		}
 
 		lastY = y
-		partIdx++
 	}
 }
 
