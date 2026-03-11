@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/disintegration/imaging"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -25,6 +27,21 @@ type Task struct {
 	Path  string
 	Index int // 原始顺序索引
 }
+
+type WebTask struct {
+	ID        string
+	Status    string // "processing", "done", "error"
+	ErrorMsg  string
+	CreatedAt time.Time
+	FileName  string // 原始文件名
+	OutFile   string // 输出PDF绝对路径
+}
+
+var (
+	webTasks      = make(map[string]*WebTask)
+	webTasksMutex sync.Mutex
+	webTasksDir   = "web_tasks_data"
+)
 
 func main() {
 	inDir := flag.String("in", "", "输入目录 (留空则启动 Web 界面)")
@@ -245,6 +262,39 @@ func findHorizontalGaps(img image.Image) []int {
 
 // ============== Web 服务相关代码 ==============
 
+func initWebTasksDir() {
+	// 每次启动时清空之前的任务文件夹
+	os.RemoveAll(webTasksDir)
+	err := os.MkdirAll(webTasksDir, 0755)
+	if err != nil {
+		log.Fatalf("无法创建 Web 任务目录: %v", err)
+	}
+
+	// 启动定期清理协程 (每 5 分钟检查一次，清理超过 20 分钟的任务)
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		for range ticker.C {
+			cleanExpiredTasks()
+		}
+	}()
+}
+
+func cleanExpiredTasks() {
+	webTasksMutex.Lock()
+	defer webTasksMutex.Unlock()
+
+	now := time.Now()
+	for id, task := range webTasks {
+		// 如果任务创建超过 20 分钟
+		if now.Sub(task.CreatedAt) > 20*time.Minute {
+			fmt.Printf("[清理] 任务 %s 已过期，正在删除相关文件...\n", id)
+			// 删除任务对应的独立文件夹
+			os.RemoveAll(filepath.Join(webTasksDir, id))
+			delete(webTasks, id)
+		}
+	}
+}
+
 const indexHTML = `
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -256,8 +306,8 @@ const indexHTML = `
         body { 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
             background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            display: flex; justify-content: center; align-items: center; 
-            height: 100vh; margin: 0; color: #333;
+            display: flex; justify-content: center; align-items: flex-start; 
+            min-height: 100vh; margin: 0; color: #333; padding-top: 10vh;
         }
         .card { 
             background: rgba(255, 255, 255, 0.95); 
@@ -281,39 +331,46 @@ const indexHTML = `
             word-break: break-all;
         }
         .upload-btn:hover { border-color: #3498db; color: #3498db; background: #f8faff; }
-        #submitBtn { 
+        #submitBtn, #downloadBtn { 
             background: #3498db; color: white; border: none; 
             padding: 14px 24px; border-radius: 8px; 
             cursor: pointer; font-size: 1.1rem; font-weight: bold; 
             width: 80%; margin-top: 1rem;
             transition: background 0.3s ease;
             box-shadow: 0 4px 6px rgba(52, 152, 219, 0.2);
+            text-decoration: none; display: inline-block; box-sizing: border-box;
         }
-        #submitBtn:hover { background: #2980b9; transform: translateY(-1px); }
+        #submitBtn:hover, #downloadBtn:hover { background: #2980b9; transform: translateY(-1px); }
         #submitBtn:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
-        #status { margin-top: 1.5rem; font-size: 0.95rem; min-height: 1.5rem; text-align: left; background: #f8f9fa; padding: 10px; border-radius: 8px; display: none;}
+        #downloadBtn { background: #27ae60; display: none; margin-top: 1.5rem; box-shadow: 0 4px 6px rgba(39, 174, 96, 0.2); }
+        #downloadBtn:hover { background: #219653; }
+        #status { margin-top: 1.5rem; font-size: 0.95rem; min-height: 1.5rem; text-align: left; background: #f8f9fa; padding: 15px; border-radius: 8px; display: none;}
         .loading { color: #e67e22; font-weight: bold; }
         .success { color: #27ae60; font-weight: bold; }
         .error { color: #e74c3c; font-weight: bold; }
+        .tips { font-size: 0.85rem; color: #7f8c8d; margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px;}
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>📚 漫画自动切白边与转换</h2>
+        <h2>📚 漫画全自动切边转换</h2>
         <form id="uploadForm">
             <div class="file-input-wrapper">
                 <label for="file" class="upload-btn" id="fileLabel">点击选择 PDF / MOBI / AZW3 ...</label>
                 <input type="file" id="file" name="file" accept=".pdf,.mobi,.azw3" required>
             </div>
-            <button type="button" id="submitBtn">上传并开始转换</button>
+            <button type="button" id="submitBtn">上传并后台转换</button>
         </form>
         <div id="status"></div>
+        <a id="downloadBtn" href="#" target="_blank">📥 下载转换后的 PDF</a>
     </div>
     <script>
         const fileInput = document.getElementById('file');
         const fileLabel = document.getElementById('fileLabel');
         const submitBtn = document.getElementById('submitBtn');
         const statusDiv = document.getElementById('status');
+        const downloadBtn = document.getElementById('downloadBtn');
+        let pollInterval;
 
         fileInput.addEventListener('change', (e) => {
             if(e.target.files.length > 0) {
@@ -321,12 +378,44 @@ const indexHTML = `
                 fileLabel.style.borderColor = '#3498db';
                 fileLabel.style.color = '#3498db';
                 statusDiv.style.display = 'none';
+                downloadBtn.style.display = 'none';
             } else {
                 fileLabel.innerText = '点击选择 PDF / MOBI / AZW3 ...';
                 fileLabel.style.borderColor = '#bdc3c7';
                 fileLabel.style.color = '#2c3e50';
             }
         });
+
+        async function pollStatus(taskId, fileName) {
+            try {
+                const res = await fetch('/status?task_id=' + taskId);
+                const data = await res.json();
+                
+                if (data.status === 'processing') {
+                    statusDiv.innerHTML = '<span class="loading">⏳ 服务器正在疯狂切图合成中...</span><div class="tips">由于运算量大，根据页数可能需要 1~5 分钟。<br>您可以切到后台干别的事，网页不关就行。</div>';
+                } else if (data.status === 'done') {
+                    clearInterval(pollInterval);
+                    statusDiv.innerHTML = '<span class="success">✅ 转换完成！请点击下方按钮下载。</span><div class="tips">为节省服务器空间，该文件将在 20 分钟后自动销毁，请尽快下载。</div>';
+                    downloadBtn.style.display = 'inline-block';
+                    
+                    let outName = fileName;
+                    const lastDot = outName.lastIndexOf('.');
+                    if(lastDot !== -1) { outName = outName.substring(0, lastDot); }
+                    outName += "_output.pdf";
+                    
+                    downloadBtn.href = '/download?task_id=' + taskId + '&filename=' + encodeURIComponent(outName);
+                    submitBtn.disabled = false;
+                } else if (data.status === 'error') {
+                    clearInterval(pollInterval);
+                    statusDiv.innerHTML = '<span class="error">❌ 转换失败: ' + data.error_msg + '</span>';
+                    submitBtn.disabled = false;
+                }
+            } catch (err) {
+                clearInterval(pollInterval);
+                statusDiv.innerHTML = '<span class="error">❌ 获取状态失败，网络连接中断！</span>';
+                submitBtn.disabled = false;
+            }
+        }
 
         submitBtn.addEventListener('click', async () => {
             if(fileInput.files.length === 0) {
@@ -339,8 +428,9 @@ const indexHTML = `
             formData.append("file", file);
 
             statusDiv.style.display = 'block';
-            statusDiv.innerHTML = '<span class="loading">正在上传并执行切图中...<br>这可能需要几分钟的时间，请耐心等待浏览器提示下载，不要关闭当前页面。</span>';
+            statusDiv.innerHTML = '<span class="loading">⬆️ 正在上传文件至服务器...</span>';
             submitBtn.disabled = true;
+            downloadBtn.style.display = 'none';
 
             try {
                 const response = await fetch('/upload', {
@@ -352,32 +442,14 @@ const indexHTML = `
                     throw new Error(await response.text());
                 }
 
-                // 下载文件
-                const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = url;
+                const data = await response.json();
+                const taskId = data.task_id;
                 
-                // 构造新文件名
-                let outName = file.name;
-                const lastDot = outName.lastIndexOf('.');
-                if(lastDot !== -1) {
-                    outName = outName.substring(0, lastDot);
-                }
-                a.download = outName + "_output.pdf";
-                
-                document.body.appendChild(a);
-                a.click();
-                setTimeout(() => {
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
-                }, 100);
-                
-                statusDiv.innerHTML = '<span class="success">✅ 转换完成！已触发下载。</span>';
+                // 开始轮询状态
+                statusDiv.innerHTML = '<span class="loading">⏳ 文件已就绪，等待处理...</span>';
+                pollInterval = setInterval(() => pollStatus(taskId, file.name), 3000);
             } catch (err) {
-                statusDiv.innerHTML = '<span class="error">❌ 处理失败: ' + err.message + '</span>';
-            } finally {
+                statusDiv.innerHTML = '<span class="error">❌ 上传失败: ' + err.message + '</span>';
                 submitBtn.disabled = false;
             }
         });
@@ -403,6 +475,8 @@ func getLocalIPs() []string {
 }
 
 func runWebServer(port string) {
+	initWebTasksDir()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, indexHTML)
@@ -433,16 +507,13 @@ func runWebServer(port string) {
 			return
 		}
 
-		// 创建临时处理目录
-		tempDir, err := os.MkdirTemp("", "web_upload_*")
-		if err != nil {
-			http.Error(w, "内部错误：无法创建临时目录", http.StatusInternalServerError)
-			return
-		}
-		defer os.RemoveAll(tempDir) // 请求结束自动清理上传的原始文件和生成的 PDF
+		// 创建独立任务
+		taskId := fmt.Sprintf("task_%d", time.Now().UnixNano())
+		taskDir := filepath.Join(webTasksDir, taskId)
+		os.MkdirAll(taskDir, 0755)
 
-		inputPath := filepath.Join(tempDir, header.Filename)
-		outPath := filepath.Join(tempDir, "output.pdf")
+		inputPath := filepath.Join(taskDir, header.Filename)
+		outPath := filepath.Join(taskDir, "output.pdf")
 
 		inFile, err := os.Create(inputPath)
 		if err != nil {
@@ -452,21 +523,81 @@ func runWebServer(port string) {
 		io.Copy(inFile, file)
 		inFile.Close()
 
-		fmt.Printf("\n[Web 上传] 接收到文件: %s, 大小: %.2f MB\n", header.Filename, float64(header.Size)/(1024*1024))
+		// 注册任务状态
+		webTasksMutex.Lock()
+		webTasks[taskId] = &WebTask{
+			ID:        taskId,
+			Status:    "processing",
+			CreatedAt: time.Now(),
+			FileName:  header.Filename,
+			OutFile:   outPath,
+		}
+		webTasksMutex.Unlock()
 
-		// 转换处理
-		err = processSingleFile(inputPath, outPath)
-		if err != nil {
-			fmt.Printf("[Web 处理错误] %s 转换失败: %v\n", header.Filename, err)
-			http.Error(w, "处理失败: "+err.Error(), http.StatusInternalServerError)
+		fmt.Printf("\n[Web] 接收到任务 %s: %s, 大小: %.2f MB\n", taskId, header.Filename, float64(header.Size)/(1024*1024))
+
+		// 开启后台异步转换
+		go func(id, in, out string) {
+			err := processSingleFile(in, out)
+
+			webTasksMutex.Lock()
+			if task, ok := webTasks[id]; ok {
+				if err != nil {
+					task.Status = "error"
+					task.ErrorMsg = err.Error()
+					fmt.Printf("[Web] 任务 %s 失败: %v\n", id, err)
+				} else {
+					task.Status = "done"
+					fmt.Printf("[Web] 任务 %s 成功完成！即将保留 20 分钟。\n", id)
+					// 处理成功后可以删除原始文件减小硬盘占用
+					os.Remove(in)
+				}
+			}
+			webTasksMutex.Unlock()
+		}(taskId, inputPath, outPath)
+
+		// 立即返回任务ID
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"task_id": taskId})
+	})
+
+	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		taskId := r.URL.Query().Get("task_id")
+		webTasksMutex.Lock()
+		task, ok := webTasks[taskId]
+		webTasksMutex.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if !ok {
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "error_msg": "任务不存在或已过期被清理"})
 			return
 		}
 
-		// 返回生成后的最新文件
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_output.pdf\"", strings.TrimSuffix(header.Filename, ext)))
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":    task.Status,
+			"error_msg": task.ErrorMsg,
+		})
+	})
+
+	http.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		taskId := r.URL.Query().Get("task_id")
+		filename := r.URL.Query().Get("filename")
+		if filename == "" {
+			filename = "output.pdf"
+		}
+
+		webTasksMutex.Lock()
+		task, ok := webTasks[taskId]
+		webTasksMutex.Unlock()
+
+		if !ok || task.Status != "done" {
+			http.Error(w, "文件不存在或尚未完成处理", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.Header().Set("Content-Type", "application/pdf")
-		http.ServeFile(w, r, outPath)
-		fmt.Printf("[Web 处理成功] 文件已返回给客户端 (临时文件即将自动清理)\n")
+		http.ServeFile(w, r, task.OutFile)
 	})
 
 	addr := ":" + port
