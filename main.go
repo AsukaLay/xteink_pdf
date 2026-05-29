@@ -567,6 +567,9 @@ const indexHTML = `
         </form>
         <div id="status"></div>
         <a id="downloadBtn" href="#" target="_blank">📥 下载转换后的 PDF</a>
+        <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px dashed #e0e0e0; font-size: 0.9rem;">
+            🚀 觉得网页慢？<a href="https://asukalay-1253207553.cos.ap-chengdu.myqcloud.com/xteink.exe" style="color: #3498db; text-decoration: none; font-weight: bold;">点击下载 Windows 桌面版</a> (处理速度更快，支持整个文件夹)
+        </div>
     </div>
     <script>
         const fileInput = document.getElementById('file');
