@@ -44,19 +44,28 @@ var (
 )
 
 func main() {
-	inDir := flag.String("in", "", "输入目录 (留空则启动 Web 界面)")
+	web := flag.Bool("web", false, "启动 Web 界面")
+	inDir := flag.String("in", ".", "输入目录 (命令行模式用)")
 	outDir := flag.String("out", ".", "输出目录 (命令行模式用)")
 	port := flag.String("port", "80", "Web 服务端口")
+	smart := flag.Bool("smart", true, "使用智能切分模式 (默认开启)")
+	keep := flag.Bool("keep", false, "智能切分时保留原图")
 	flag.Parse()
 
-	if *inDir != "" {
-		runCLI(*inDir, *outDir)
-	} else {
+	if *web {
 		runWebServer(*port)
+	} else {
+		runCLI(*inDir, *outDir, *smart, *keep)
+
+		// 防止 Windows 双击直接运行结束后窗口瞬间关闭
+		if runtime.GOOS == "windows" {
+			fmt.Println("\n按回车键 (Enter) 退出...")
+			fmt.Scanln()
+		}
 	}
 }
 
-func runCLI(inDir, outDir string) {
+func runCLI(inDir, outDir string, smart, keep bool) {
 	// 确保输出目录存在
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		log.Fatal("无法创建输出目录:", err)
@@ -95,7 +104,15 @@ func runCLI(inDir, outDir string) {
 		outputPDF := filepath.Join(outDir, base+"_output.pdf")
 
 		fmt.Printf("\n========== 开始处理: %s ==========\n", inputFile)
-		if err := processSingleFile(inputPath, outputPDF); err != nil {
+
+		var err error
+		if smart {
+			err = processSmartSplitFile(inputPath, outputPDF, keep)
+		} else {
+			err = processSingleFile(inputPath, outputPDF)
+		}
+
+		if err != nil {
 			fmt.Printf("处理失败: %v\n", err)
 		}
 	}

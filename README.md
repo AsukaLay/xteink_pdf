@@ -5,6 +5,7 @@ pdf动漫切割更细方便xteink阅星曈X4,阅星曈X3阅读
 
 新增mobi azw3格式
 
+./xteink.exe -in . -out . -smart
 
 在线网页修改地址:[点击我](http://xteink.196663.xyz:8089/)
 ![593b6d7bc44ffc9a84dda6fe14a122f7](https://github.com/user-attachments/assets/34f3cda4-a7c4-42ae-8c48-3f2e5b3d7a84)
