@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -492,8 +493,7 @@ func cleanExpiredTasks() {
 	}
 }
 
-const indexHTML = `
-<!DOCTYPE html>
+const indexHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -504,50 +504,87 @@ const indexHTML = `
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
             background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
             display: flex; justify-content: center; align-items: flex-start; 
-            min-height: 100vh; margin: 0; color: #333; padding-top: 10vh;
+            min-height: 100vh; margin: 0; color: #333; padding-top: 5vh; padding-bottom: 5vh;
         }
         .card { 
             background: rgba(255, 255, 255, 0.95); 
             padding: 2.5rem 2rem; 
             border-radius: 16px; 
             box-shadow: 0 10px 30px rgba(0,0,0,0.1); 
-            text-align: center; width: 90%; max-width: 450px; 
+            text-align: center; width: 90%; max-width: 480px; 
             backdrop-filter: blur(10px);
         }
-        h2 { margin-top: 0; color: #2c3e50; font-size: 1.6rem; margin-bottom: 2rem; }
+        h2 { margin-top: 0; color: #2c3e50; font-size: 1.6rem; margin-bottom: 1.5rem; }
         .file-input-wrapper { margin: 1.5rem 0; }
         input[type="file"] { display: none; }
         .upload-btn { 
             background: #eef2f5; color: #2c3e50; 
-            padding: 12px 24px; border-radius: 8px; 
+            padding: 14px 24px; border-radius: 8px; 
             cursor: pointer; display: inline-block; 
             font-weight: 600; font-size: 1rem;
             border: 2px dashed #bdc3c7;
             transition: all 0.3s ease;
-            width: 80%; box-sizing: border-box;
+            width: 90%; box-sizing: border-box;
             word-break: break-all;
         }
         .upload-btn:hover { border-color: #3498db; color: #3498db; background: #f8faff; }
-        #submitBtn, #submitSmartBtn, #downloadBtn {
+        #submitBtn, #submitSmartBtn, #downloadAllBtn {
             background: #3498db; color: white; border: none; 
             padding: 14px 24px; border-radius: 8px; 
-            cursor: pointer; font-size: 1.1rem; font-weight: bold; 
-            width: 80%; margin-top: 1rem;
-            transition: background 0.3s ease;
+            cursor: pointer; font-size: 1.05rem; font-weight: bold; 
+            width: 90%; margin-top: 0.8rem;
+            transition: all 0.3s ease;
             box-shadow: 0 4px 6px rgba(52, 152, 219, 0.2);
             text-decoration: none; display: inline-block; box-sizing: border-box;
         }
-        #submitBtn:hover, #downloadBtn:hover { background: #2980b9; transform: translateY(-1px); }
+        #submitBtn:hover { background: #2980b9; transform: translateY(-1px); }
         #submitBtn:disabled, #submitSmartBtn:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
-        #submitSmartBtn { background: #8e44ad; box-shadow: 0 4px 6px rgba(142, 68, 173, 0.2); margin-top: 0.5rem; }
+        #submitSmartBtn { background: #8e44ad; box-shadow: 0 4px 6px rgba(142, 68, 173, 0.2); }
         #submitSmartBtn:hover { background: #7d3c98; transform: translateY(-1px); }
-        #downloadBtn { background: #27ae60; display: none; margin-top: 1.5rem; box-shadow: 0 4px 6px rgba(39, 174, 96, 0.2); }
-        #downloadBtn:hover { background: #219653; }
-        #status { margin-top: 1.5rem; font-size: 0.95rem; min-height: 1.5rem; text-align: left; background: #f8f9fa; padding: 15px; border-radius: 8px; display: none;}
+        #downloadAllBtn { background: #27ae60; display: none; margin-top: 1.2rem; box-shadow: 0 4px 6px rgba(39, 174, 96, 0.2); }
+        #downloadAllBtn:hover { background: #219653; transform: translateY(-1px); }
+        
+        #status { margin-top: 1.2rem; font-size: 0.95rem; text-align: left; background: #f8f9fa; padding: 12px 15px; border-radius: 8px; display: none;}
         .loading { color: #e67e22; font-weight: bold; }
         .success { color: #27ae60; font-weight: bold; }
         .error { color: #e74c3c; font-weight: bold; }
-        .tips { font-size: 0.85rem; color: #7f8c8d; margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px;}
+        .tips { font-size: 0.85rem; color: #7f8c8d; margin-top: 6px; border-top: 1px solid #eee; padding-top: 6px;}
+
+        .task-list {
+            margin-top: 1rem;
+            text-align: left;
+            max-height: 260px;
+            overflow-y: auto;
+            display: none;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.02);
+        }
+        .task-item {
+            padding: 10px 14px;
+            border-bottom: 1px solid #f1f5f9;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9rem;
+        }
+        .task-item:last-child { border-bottom: none; }
+        .task-name {
+            font-weight: 600;
+            color: #334155;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .task-status { font-size: 0.85rem; }
+        .task-dl-btn {
+            background: #27ae60; color: white; border: none;
+            padding: 5px 12px; border-radius: 6px; text-decoration: none;
+            font-size: 0.82rem; font-weight: bold; transition: background 0.2s;
+        }
+        .task-dl-btn:hover { background: #219653; }
     </style>
 </head>
 <body>
@@ -555,8 +592,8 @@ const indexHTML = `
         <h2>📚 漫画全自动切边转换</h2>
         <form id="uploadForm">
             <div class="file-input-wrapper">
-                <label for="file" class="upload-btn" id="fileLabel">点击选择 PDF/MOBI/AZW3 ...</label>
-                <input type="file" id="file" name="file" accept=".pdf,.mobi,.azw3" required>
+                <label for="file" class="upload-btn" id="fileLabel">点击选择 PDF/MOBI/AZW3 (支持多选) ...</label>
+                <input type="file" id="file" name="file" accept=".pdf,.mobi,.azw3" multiple required>
             </div>
             <button type="button" id="submitBtn">上传转换（不建议使用）</button>
             <button type="button" id="submitSmartBtn">🔍 智能字体检测切分</button>
@@ -566,7 +603,8 @@ const indexHTML = `
             </label>
         </form>
         <div id="status"></div>
-        <a id="downloadBtn" href="#" target="_blank">📥 下载转换后的 PDF</a>
+        <div id="taskList" class="task-list"></div>
+        <a id="downloadAllBtn" href="#">📦 一键打包下载全部文件 (ZIP)</a>
         <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px dashed #e0e0e0; font-size: 0.9rem;">
             🚀 觉得网页慢？<a href="https://asukalay-1253207553.cos.ap-chengdu.myqcloud.com/xteink.exe" style="color: #3498db; text-decoration: none; font-weight: bold;">点击下载 Windows 桌面版</a> (处理速度更快，支持整个文件夹)
         </div>
@@ -575,89 +613,159 @@ const indexHTML = `
         const fileInput = document.getElementById('file');
         const fileLabel = document.getElementById('fileLabel');
         const submitBtn = document.getElementById('submitBtn');
+        const submitSmartBtn = document.getElementById('submitSmartBtn');
+        const keepOriginal = document.getElementById('keepOriginal');
         const statusDiv = document.getElementById('status');
-        const downloadBtn = document.getElementById('downloadBtn');
-        let pollInterval;
+        const taskListDiv = document.getElementById('taskList');
+        const downloadAllBtn = document.getElementById('downloadAllBtn');
+
+        let activeTasks = [];
+        let activePollTimer = null;
 
         fileInput.addEventListener('change', (e) => {
             if(e.target.files.length > 0) {
-                fileLabel.innerText = '已选择: ' + e.target.files[0].name;
+                if (e.target.files.length === 1) {
+                    fileLabel.innerText = '已选择: ' + e.target.files[0].name;
+                } else {
+                    fileLabel.innerText = '已选择 ' + e.target.files.length + ' 个文件';
+                }
                 fileLabel.style.borderColor = '#3498db';
                 fileLabel.style.color = '#3498db';
                 statusDiv.style.display = 'none';
-                downloadBtn.style.display = 'none';
+                taskListDiv.style.display = 'none';
+                downloadAllBtn.style.display = 'none';
             } else {
-                fileLabel.innerText = '点击选择 PDF / MOBI / AZW3 ...';
+                fileLabel.innerText = '点击选择 PDF / MOBI / AZW3 (支持多选) ...';
                 fileLabel.style.borderColor = '#bdc3c7';
                 fileLabel.style.color = '#2c3e50';
             }
         });
 
-        async function pollStatus(taskId, fileName) {
-            try {
-                const res = await fetch('/status?task_id=' + taskId);
-                const data = await res.json();
-                
-                if (data.status === 'processing') {
-                    statusDiv.innerHTML = '<span class="loading">⏳ 服务器正在疯狂切图合成中...</span><div class="tips">由于运算量大，根据页数可能需要 1~5 分钟。<br>您可以切到后台干别的事，网页不关就行。</div>';
-                } else if (data.status === 'done') {
-                    clearInterval(pollInterval);
-                    statusDiv.innerHTML = '<span class="success">✅ 转换完成！请点击下方按钮下载。</span><div class="tips">为节省服务器空间，该文件将在 20 分钟后自动销毁，请尽快下载。</div>';
-                    downloadBtn.style.display = 'inline-block';
+        async function uploadTo(endpoint) {
+            if(fileInput.files.length === 0) {
+                statusDiv.style.display = 'block';
+                statusDiv.innerHTML = '<span class="error">请先选择文件！</span>';
+                return;
+            }
 
-                    let outName = fileName;
-                    const lastDot = outName.lastIndexOf('.');
-                    if(lastDot !== -1) { outName = outName.substring(0, lastDot); }
-                    outName += "_output.pdf";
+            const files = Array.from(fileInput.files);
+            submitBtn.disabled = true;
+            submitSmartBtn.disabled = true;
+            downloadAllBtn.style.display = 'none';
+            statusDiv.style.display = 'block';
+            statusDiv.innerHTML = '<span class="loading">⬆️ 正在上传文件至服务器...</span>';
+            
+            taskListDiv.style.display = 'block';
+            taskListDiv.innerHTML = '';
+            activeTasks = [];
 
-                    downloadBtn.href = '/download?task_id=' + taskId + '&filename=' + encodeURIComponent(outName);
-                    submitBtn.disabled = false;
-                    submitSmartBtn.disabled = false;
-                } else if (data.status === 'error') {
-                    clearInterval(pollInterval);
-                    statusDiv.innerHTML = '<span class="error">❌ 转换失败: ' + data.error_msg + '</span>';
-                    submitBtn.disabled = false;
-                    submitSmartBtn.disabled = false;
+            if (activePollTimer) clearInterval(activePollTimer);
+
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const formData = new FormData();
+                formData.append("file", file);
+                formData.append("keep_original", keepOriginal.checked ? "1" : "0");
+
+                const rowId = 'task-row-' + i;
+                taskListDiv.innerHTML += '<div class="task-item" id="' + rowId + '">' +
+                    '<div class="task-name" title="' + file.name + '">📄 ' + file.name + '</div>' +
+                    '<div class="task-status loading" id="status-' + i + '">⬆️ 上传中...</div>' +
+                    '</div>';
+
+                try {
+                    const response = await fetch(endpoint, { method: 'POST', body: formData });
+                    if(!response.ok) { throw new Error(await response.text()); }
+                    const data = await response.json();
+                    const taskId = data.task_id;
+
+                    document.getElementById('status-' + i).innerText = '⏳ 处理中...';
+                    activeTasks.push({
+                        index: i,
+                        taskId: taskId,
+                        fileName: file.name,
+                        status: 'processing'
+                    });
+                } catch (err) {
+                    const elem = document.getElementById('status-' + i);
+                    if (elem) {
+                        elem.className = 'task-status error';
+                        elem.innerText = '❌ 上传失败';
+                    }
                 }
-            } catch (err) {
-                clearInterval(pollInterval);
-                statusDiv.innerHTML = '<span class="error">❌ 获取状态失败，网络连接中断！</span>';
+            }
+
+            if (activeTasks.length > 0) {
+                statusDiv.innerHTML = '<span class="loading">⏳ 服务器正在处理中 (0/' + activeTasks.length + ' 完成)...</span><div class="tips">处理完成后下方将出现【一键打包下载】按钮，也可单独下载各个文件。</div>';
+                activePollTimer = setInterval(pollAllTasks, 3000);
+            } else {
+                statusDiv.innerHTML = '<span class="error">❌ 所有文件上传失败</span>';
                 submitBtn.disabled = false;
                 submitSmartBtn.disabled = false;
             }
         }
 
-        const submitSmartBtn = document.getElementById('submitSmartBtn');
-        const keepOriginal = document.getElementById('keepOriginal');
+        async function pollAllTasks() {
+            let doneCount = 0;
+            let finishedCount = 0;
 
-        async function uploadTo(endpoint) {
-            if(fileInput.files.length === 0) {
-                statusDiv.style.display = 'block';
-                statusDiv.innerHTML = '<span class="error">请先选择一个文件！</span>';
-                return;
+            for (let task of activeTasks) {
+                if (task.status === 'done' || task.status === 'error') {
+                    finishedCount++;
+                    if (task.status === 'done') doneCount++;
+                    continue;
+                }
+
+                try {
+                    const res = await fetch('/status?task_id=' + task.taskId);
+                    const data = await res.json();
+                    
+                    const statusElem = document.getElementById('status-' + task.index);
+
+                    if (data.status === 'done') {
+                        task.status = 'done';
+                        doneCount++;
+                        finishedCount++;
+                        
+                        let outName = task.fileName;
+                        const lastDot = outName.lastIndexOf('.');
+                        if(lastDot !== -1) { outName = outName.substring(0, lastDot); }
+                        outName += "_output.pdf";
+
+                        const dlUrl = '/download?task_id=' + task.taskId + '&filename=' + encodeURIComponent(outName);
+                        if (statusElem) {
+                            statusElem.className = 'task-status success';
+                            statusElem.innerHTML = '<a class="task-dl-btn" href="' + dlUrl + '" target="_blank">📥 下载</a>';
+                        }
+                    } else if (data.status === 'error') {
+                        task.status = 'error';
+                        finishedCount++;
+                        if (statusElem) {
+                            statusElem.className = 'task-status error';
+                            statusElem.innerText = '❌ 转换失败';
+                        }
+                    }
+                } catch (err) {
+                    // 网络短路重试
+                }
             }
-            const file = fileInput.files[0];
-            const formData = new FormData();
-            formData.append("file", file);
-            formData.append("keep_original", keepOriginal.checked ? "1" : "0");
 
-            statusDiv.style.display = 'block';
-            statusDiv.innerHTML = '<span class="loading">⬆️ 正在上传文件至服务器...</span>';
-            submitBtn.disabled = true;
-            submitSmartBtn.disabled = true;
-            downloadBtn.style.display = 'none';
+            statusDiv.innerHTML = '<span class="loading">⏳ 转换处理中 (' + doneCount + '/' + activeTasks.length + ' 完成)...</span><div class="tips">由于运算量大，请耐心等待。网页无需刷新。</div>';
 
-            try {
-                const response = await fetch(endpoint, { method: 'POST', body: formData });
-                if(!response.ok) { throw new Error(await response.text()); }
-                const data = await response.json();
-                const taskId = data.task_id;
-                statusDiv.innerHTML = '<span class="loading">⏳ 文件已就绪，等待处理...</span>';
-                pollInterval = setInterval(() => pollStatus(taskId, file.name), 3000);
-            } catch (err) {
-                statusDiv.innerHTML = '<span class="error">❌ 上传失败: ' + err.message + '</span>';
+            if (finishedCount === activeTasks.length) {
+                clearInterval(activePollTimer);
                 submitBtn.disabled = false;
                 submitSmartBtn.disabled = false;
+
+                if (doneCount > 0) {
+                    statusDiv.innerHTML = '<span class="success">🎉 转换完成！(' + doneCount + '/' + activeTasks.length + ' 成功)</span>';
+                    
+                    const completedTaskIds = activeTasks.filter(t => t.status === 'done').map(t => t.taskId);
+                    downloadAllBtn.href = '/download-all?task_ids=' + completedTaskIds.join(',');
+                    downloadAllBtn.style.display = 'inline-block';
+                } else {
+                    statusDiv.innerHTML = '<span class="error">❌ 所有任务转换失败</span>';
+                }
             }
         }
 
@@ -872,6 +980,54 @@ func runWebServer(port string) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.Header().Set("Content-Type", "application/pdf")
 		http.ServeFile(w, r, task.OutFile)
+	})
+
+	http.HandleFunc("/download-all", func(w http.ResponseWriter, r *http.Request) {
+		taskIdsStr := r.URL.Query().Get("task_ids")
+		if taskIdsStr == "" {
+			http.Error(w, "未指定任务列表", http.StatusBadRequest)
+			return
+		}
+		ids := strings.Split(taskIdsStr, ",")
+
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"xteink_batch_converted.zip\"")
+
+		zipWriter := zip.NewWriter(w)
+		defer zipWriter.Close()
+
+		for _, taskId := range ids {
+			taskId = strings.TrimSpace(taskId)
+			if taskId == "" {
+				continue
+			}
+
+			webTasksMutex.Lock()
+			task, ok := webTasks[taskId]
+			webTasksMutex.Unlock()
+
+			if !ok || task.Status != "done" {
+				continue
+			}
+
+			fileToZip, err := os.Open(task.OutFile)
+			if err != nil {
+				continue
+			}
+
+			ext := filepath.Ext(task.FileName)
+			baseName := strings.TrimSuffix(task.FileName, ext)
+			zipEntryName := baseName + "_output.pdf"
+
+			wFile, err := zipWriter.Create(zipEntryName)
+			if err != nil {
+				fileToZip.Close()
+				continue
+			}
+
+			io.Copy(wFile, fileToZip)
+			fileToZip.Close()
+		}
 	})
 
 	addr := ":" + port
