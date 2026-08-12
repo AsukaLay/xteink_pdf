@@ -2,10 +2,12 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
+	"image/color"
 	"io"
 	"log"
 	"net"
@@ -13,7 +15,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +26,9 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 )
 
 type Task struct {
@@ -210,22 +217,30 @@ func processSmartSplitFile(inputFile, outputPDF string, keepOriginal bool) error
 
 	files, _ := filepath.Glob(filepath.Join(tempRaw, "*.*"))
 	sort.Strings(files)
-	fmt.Printf("Step 2: 智能字体检测切分 (%d 张图片)...\n", len(files))
+	totalFiles := len(files)
+	fmt.Printf("Step 2: 智能字体检测切分 (%d 张图片)...\n", totalFiles)
 
 	outSeq := 0
-	for _, f := range files {
+	for idx, f := range files {
+		if (idx+1)%20 == 0 || idx == totalFiles-1 {
+			fmt.Printf("Step 2 进度: [%d/%d] (%.1f%%)...\n", idx+1, totalFiles, float64(idx+1)/float64(totalFiles)*100)
+		}
 		fext := strings.ToLower(filepath.Ext(f))
 		if fext != ".jpg" && fext != ".png" && fext != ".jpeg" {
+			os.Remove(f)
 			continue
 		}
 		src, err := imaging.Open(f)
 		if err != nil {
+			os.Remove(f)
 			continue
 		}
 		bounds := src.Bounds()
 		w := bounds.Dx()
 		h := bounds.Dy()
 		if w == 0 {
+			src = nil
+			os.Remove(f)
 			continue
 		}
 
@@ -278,6 +293,13 @@ func processSmartSplitFile(inputFile, outputPDF string, keepOriginal bool) error
 			}
 			lastY = gapY
 		}
+
+		src = nil
+		os.Remove(f)
+		if (idx+1)%15 == 0 {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
 	}
 
 	fmt.Println("Step 3: 正在合成 PDF...")
@@ -293,6 +315,395 @@ func processSmartSplitFile(inputFile, outputPDF string, keepOriginal bool) error
 		return fmt.Errorf("合成 PDF 失败: %v", err)
 	}
 	fmt.Printf("智能切分完成，PDF 已保存: %s\n", outputPDF)
+	return nil
+}
+
+// drawStatusBarText draws a progress/page status bar at the bottom 20px of the image
+func drawStatusBarText(img *image.RGBA, text string, width, height int) {
+	barY := height - 20
+	for x := 0; x < width; x++ {
+		img.Set(x, barY, color.Black)
+	}
+
+	d := &font.Drawer{
+		Dst:  img,
+		Src:  image.NewUniform(color.Black),
+		Face: basicfont.Face7x13,
+	}
+	textWidth := d.MeasureString(text).Ceil()
+	textX := (width - textWidth) / 2
+	if textX < 0 {
+		textX = 0
+	}
+	textY := barY + 14
+
+	d.Dot = fixed.P(textX, textY)
+	d.DrawString(text)
+}
+
+// encodeXTG encodes an image.Image into XTG format (22-byte header + 1bpp bitmap)
+func encodeXTG(img image.Image, width, height int, dither bool) []byte {
+	rowBytes := (width + 7) / 8
+	bitmapSize := rowBytes * height
+
+	header := make([]byte, 22)
+	header[0] = 'X'
+	header[1] = 'T'
+	header[2] = 'G'
+	header[3] = 0x00
+
+	binary.LittleEndian.PutUint16(header[4:6], uint16(width))
+	binary.LittleEndian.PutUint16(header[6:8], uint16(height))
+	header[8] = 0 // colorMode = 0
+	header[9] = 0 // compression = 0
+
+	binary.LittleEndian.PutUint32(header[10:14], uint32(bitmapSize))
+
+	bitmap := make([]byte, bitmapSize)
+	grayBuf := make([]float32, width*height)
+	bounds := img.Bounds()
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			var r, g, b uint32
+			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+				r, g, b, _ = img.At(x, y).RGBA()
+			} else {
+				r, g, b = 65535, 65535, 65535
+			}
+			lum := 0.299*float32(r>>8) + 0.587*float32(g>>8) + 0.114*float32(b>>8)
+			grayBuf[y*width+x] = lum
+		}
+	}
+
+	if dither {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				idx := y*width + x
+				oldVal := grayBuf[idx]
+				newVal := float32(0)
+				if oldVal >= 128 {
+					newVal = 255
+				}
+				grayBuf[idx] = newVal
+				err := (oldVal - newVal)
+
+				if x+1 < width {
+					grayBuf[idx+1] += err * (7.0 / 16.0)
+				}
+				if y+1 < height {
+					if x > 0 {
+						grayBuf[idx+width-1] += err * (3.0 / 16.0)
+					}
+					grayBuf[idx+width] += err * (5.0 / 16.0)
+					if x+1 < width {
+						grayBuf[idx+width+1] += err * (1.0 / 16.0)
+					}
+				}
+			}
+		}
+	}
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			idx := y*width + x
+			if grayBuf[idx] >= 128 {
+				byteIdx := y*rowBytes + (x / 8)
+				bitIdx := 7 - (x % 8)
+				bitmap[byteIdx] |= (1 << bitIdx)
+			}
+		}
+	}
+
+	result := make([]byte, len(header)+len(bitmap))
+	copy(result[0:], header)
+	copy(result[len(header):], bitmap)
+	return result
+}
+
+// buildXTCContainer creates official 56-byte container header + 256-byte metadata + index table + page data
+// orient: 0=竖屏, 90=横屏（X4 设备通过 buf[8] 字节识别横还是竖屏）
+func buildXTCContainer(xtgPages [][]byte, title string, width, height int, orient int) []byte {
+	pageCount := len(xtgPages)
+	headerSize := 56
+	metadataSize := 256
+	indexEntrySize := 16
+	indexSize := pageCount * indexEntrySize
+
+	metadataOffset := headerSize
+	chapterOffset := metadataOffset + metadataSize
+	indexOffset := chapterOffset
+	pageDataOffset := indexOffset + indexSize
+
+	pageOffsets := make([]uint64, pageCount)
+	pageSizes := make([]uint32, pageCount)
+	currOff := uint64(pageDataOffset)
+	for i, page := range xtgPages {
+		pageOffsets[i] = currOff
+		pageSizes[i] = uint32(len(page))
+		currOff += uint64(len(page))
+	}
+
+	totalSize := currOff
+	buf := make([]byte, totalSize)
+
+	copy(buf[0:4], []byte("XTC\x00"))
+	binary.LittleEndian.PutUint16(buf[4:6], 1)
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(pageCount))
+	// buf[8] readDirection: 与 epub-to-xtc-converter 保持一致写 0。
+	// X4 设备依据页面索引中的宽高(800>480)自动判断横屏显示。
+	buf[8] = 0
+	buf[9] = 1
+	buf[10] = 0
+	buf[11] = 0
+	binary.LittleEndian.PutUint32(buf[12:16], 1)
+
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(metadataOffset))
+	binary.LittleEndian.PutUint64(buf[24:32], uint64(indexOffset))
+	binary.LittleEndian.PutUint64(buf[32:40], uint64(pageDataOffset))
+	binary.LittleEndian.PutUint64(buf[40:48], 0)
+	binary.LittleEndian.PutUint64(buf[48:56], uint64(chapterOffset))
+
+	if len(title) > 126 {
+		title = title[:126]
+	}
+	copy(buf[metadataOffset:], []byte(title))
+	binary.LittleEndian.PutUint32(buf[metadataOffset+192:metadataOffset+196], uint32(time.Now().Unix()))
+
+	idxPos := indexOffset
+	for i := 0; i < pageCount; i++ {
+		binary.LittleEndian.PutUint64(buf[idxPos:idxPos+8], pageOffsets[i])
+		binary.LittleEndian.PutUint32(buf[idxPos+8:idxPos+12], pageSizes[i])
+		binary.LittleEndian.PutUint16(buf[idxPos+12:idxPos+14], uint16(width))
+		binary.LittleEndian.PutUint16(buf[idxPos+14:idxPos+16], uint16(height))
+		idxPos += indexEntrySize
+	}
+
+	dataPos := pageDataOffset
+	for _, page := range xtgPages {
+		copy(buf[dataPos:], page)
+		dataPos += len(page)
+	}
+
+	return buf
+}
+
+// processSmartSplitToXTC extracts images, splits them intelligently,
+// and encodes into Xteink X4 standard XTC format (480x800, 1-bit Dither, Status Bar).
+func processSmartSplitToXTC(inputFile, outputXTC string, keepOriginal bool, orient int) error {
+	tempRaw, err := os.MkdirTemp("", "temp_raw_*")
+	if err != nil {
+		return fmt.Errorf("创建临时目录失败: %v", err)
+	}
+	defer os.RemoveAll(tempRaw)
+
+	tempOut, err := os.MkdirTemp("", "temp_smart_*")
+	if err != nil {
+		return fmt.Errorf("创建临时目录失败: %v", err)
+	}
+	defer os.RemoveAll(tempOut)
+
+	ext := strings.ToLower(filepath.Ext(inputFile))
+	fmt.Printf("[XTC] Step 1: 正在从 %s 提取图片...\n", strings.ToUpper(ext[1:]))
+
+	if ext == ".pdf" {
+		if err := api.ExtractImagesFile(inputFile, tempRaw, nil, nil); err != nil {
+			return fmt.Errorf("提取 PDF 图片失败: %v", err)
+		}
+	} else if ext == ".mobi" || ext == ".azw3" {
+		if err := extractMobiImages(inputFile, tempRaw); err != nil {
+			return fmt.Errorf("提取 MOBI/AZW3 图片失败: %v", err)
+		}
+	}
+
+	files, _ := filepath.Glob(filepath.Join(tempRaw, "*.*"))
+	sort.Strings(files)
+	totalFiles := len(files)
+	fmt.Printf("[XTC] Step 2: 智能字体检测切分 (%d 张图片)...\n", totalFiles)
+
+	outSeq := 0
+	for idx, f := range files {
+		if (idx+1)%20 == 0 || idx == totalFiles-1 {
+			fmt.Printf("[XTC] Step 2 进度: [%d/%d] (%.1f%%)...\n", idx+1, totalFiles, float64(idx+1)/float64(totalFiles)*100)
+		}
+		fext := strings.ToLower(filepath.Ext(f))
+		if fext != ".jpg" && fext != ".png" && fext != ".jpeg" {
+			os.Remove(f)
+			continue
+		}
+		src, err := imaging.Open(f)
+		if err != nil {
+			os.Remove(f)
+			continue
+		}
+		bounds := src.Bounds()
+		w := bounds.Dx()
+		h := bounds.Dy()
+		_ = h
+		if w == 0 {
+			src = nil
+			os.Remove(f)
+			continue
+		}
+
+		if keepOriginal {
+			origPath := filepath.Join(tempOut, fmt.Sprintf("%06d_orig.jpg", outSeq))
+			imaging.Save(src, origPath)
+			outSeq++
+		}
+
+		gaps := findHorizontalGaps(src)
+		gaps = append(gaps, bounds.Max.Y)
+		lastY := bounds.Min.Y
+		for _, gapY := range gaps {
+			segH := gapY - lastY
+			if segH < 50 {
+				continue
+			}
+			segRendered := (600.0 / float64(w)) * float64(segH)
+			if segRendered > 800 {
+				nParts := int(segRendered/800) + 1
+				cuts := findBestCutLines(imaging.Crop(src, image.Rect(bounds.Min.X, lastY, bounds.Max.X, gapY)), nParts)
+				prevY := lastY
+				for _, c := range cuts {
+					absC := lastY + c
+					if absC-prevY < 50 {
+						continue
+					}
+					p := filepath.Join(tempOut, fmt.Sprintf("%06d_split.jpg", outSeq))
+					imaging.Save(imaging.Crop(src, image.Rect(bounds.Min.X, prevY, bounds.Max.X, absC)), p)
+					outSeq++
+					prevY = absC
+				}
+				if gapY-prevY >= 50 {
+					p := filepath.Join(tempOut, fmt.Sprintf("%06d_split.jpg", outSeq))
+					imaging.Save(imaging.Crop(src, image.Rect(bounds.Min.X, prevY, bounds.Max.X, gapY)), p)
+					outSeq++
+				}
+			} else {
+				p := filepath.Join(tempOut, fmt.Sprintf("%06d_split.jpg", outSeq))
+				imaging.Save(imaging.Crop(src, image.Rect(bounds.Min.X, lastY, bounds.Max.X, gapY)), p)
+				outSeq++
+			}
+			lastY = gapY
+		}
+
+		src = nil
+		os.Remove(f)
+		if (idx+1)%15 == 0 {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}
+
+	finalImgs, _ := filepath.Glob(filepath.Join(tempOut, "*.jpg"))
+	if len(finalImgs) == 0 {
+		return fmt.Errorf("未找到任何图片")
+	}
+	sort.Strings(finalImgs)
+
+	targetWidth := 480
+	targetHeight := 800
+	contentHeight := 780
+
+	fmt.Printf("[XTC] Step 3: 正在转为 Xteink X4 XTC 格式 (自适应 480x800, Orient=%d, 1-bit Dither, 状态栏)...\n", orient)
+
+	var xtgPages [][]byte
+	total := len(finalImgs)
+
+	for idx, imgPath := range finalImgs {
+		if (idx+1)%50 == 0 || idx == total-1 {
+			fmt.Printf("[XTC] Step 3 进度: [%d/%d] (%.1f%%)...\n", idx+1, total, float64(idx+1)/float64(total)*100)
+		}
+		src, err := imaging.Open(imgPath)
+		if err != nil {
+			continue
+		}
+
+		// 不对图片做额外旋转：直接将漫画内容缩放适配到目标尺寸 (%dx%d)。
+		// 威新X4通过判断页面宽>高自动识别横屏显示。
+		canvas := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+		for i := 0; i < len(canvas.Pix); i += 4 {
+			canvas.Pix[i] = 255
+			canvas.Pix[i+1] = 255
+			canvas.Pix[i+2] = 255
+			canvas.Pix[i+3] = 255
+		}
+
+		bounds := src.Bounds()
+		sw := bounds.Dx()
+		sh := bounds.Dy()
+		if sw > 0 && sh > 0 {
+			// 方案A：如果用户选择了横屏模式（90或270），且当前页面宽 > 高（横图），
+			// 则根据旋转方向对图片进行物理旋转，使其变为竖屏比例（480x800），防止硬件花屏。
+			if sw > sh && (orient == 90 || orient == 270) {
+				if orient == 90 {
+					src = imaging.Rotate90(src)
+				} else {
+					src = imaging.Rotate270(src)
+				}
+				bounds = src.Bounds()
+				sw = bounds.Dx()
+				sh = bounds.Dy()
+			}
+
+			scaleX := float64(targetWidth) / float64(sw)
+			scaleY := float64(contentHeight) / float64(sh)
+			scale := scaleX
+			if scaleY < scale {
+				scale = scaleY
+			}
+			newW := int(float64(sw) * scale)
+			newH := int(float64(sh) * scale)
+			if newW < 1 {
+				newW = 1
+			}
+			if newH < 1 {
+				newH = 1
+			}
+
+			resized := imaging.Resize(src, newW, newH, imaging.Lanczos)
+			offsetX := (targetWidth - newW) / 2
+			offsetY := (contentHeight - newH) / 2
+
+			for y := 0; y < newH; y++ {
+				for x := 0; x < newW; x++ {
+					destX := offsetX + x
+					destY := offsetY + y
+					if destX >= 0 && destX < targetWidth && destY >= 0 && destY < contentHeight {
+						canvas.Set(destX, destY, resized.At(x, y))
+					}
+				}
+			}
+			resized = nil
+		}
+		src = nil
+
+		statusText := fmt.Sprintf("%d / %d", idx+1, total)
+		drawStatusBarText(canvas, statusText, targetWidth, targetHeight)
+
+		xtg := encodeXTG(canvas, targetWidth, targetHeight, true)
+		xtgPages = append(xtgPages, xtg)
+		canvas = nil
+
+		if (idx+1)%25 == 0 {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}
+
+	baseName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
+	xtcBytes := buildXTCContainer(xtgPages, baseName, targetWidth, targetHeight, orient)
+
+	if err := os.WriteFile(outputXTC, xtcBytes, 0644); err != nil {
+		return fmt.Errorf("写入 XTC 文件失败: %v", err)
+	}
+
+	orientation := "标准竖屏 480x800"
+	if orient == 90 || orient == 270 {
+		orientation = "自适应旋转横屏 480x800"
+	}
+	fmt.Printf("[XTC] 转换完成！已导出 %s XTC 文件: %s (共 %d 页)\n", orientation, outputXTC, len(xtgPages))
 	return nil
 }
 
@@ -528,7 +939,7 @@ const indexHTML = `<!DOCTYPE html>
             word-break: break-all;
         }
         .upload-btn:hover { border-color: #3498db; color: #3498db; background: #f8faff; }
-        #submitBtn, #submitSmartBtn, #downloadAllBtn {
+        #submitBtn, #submitSmartBtn, #submitSmartXTCBtn, #downloadAllBtn {
             background: #3498db; color: white; border: none; 
             padding: 14px 24px; border-radius: 8px; 
             cursor: pointer; font-size: 1.05rem; font-weight: bold; 
@@ -538,9 +949,11 @@ const indexHTML = `<!DOCTYPE html>
             text-decoration: none; display: inline-block; box-sizing: border-box;
         }
         #submitBtn:hover { background: #2980b9; transform: translateY(-1px); }
-        #submitBtn:disabled, #submitSmartBtn:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
+        #submitBtn:disabled, #submitSmartBtn:disabled, #submitSmartXTCBtn:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
         #submitSmartBtn { background: #8e44ad; box-shadow: 0 4px 6px rgba(142, 68, 173, 0.2); }
         #submitSmartBtn:hover { background: #7d3c98; transform: translateY(-1px); }
+        #submitSmartXTCBtn { background: #e67e22; box-shadow: 0 4px 6px rgba(230, 126, 34, 0.2); }
+        #submitSmartXTCBtn:hover { background: #d35400; transform: translateY(-1px); }
         #downloadAllBtn { background: #27ae60; display: none; margin-top: 1.2rem; box-shadow: 0 4px 6px rgba(39, 174, 96, 0.2); }
         #downloadAllBtn:hover { background: #219653; transform: translateY(-1px); }
         
@@ -585,6 +998,14 @@ const indexHTML = `<!DOCTYPE html>
             font-size: 0.82rem; font-weight: bold; transition: background 0.2s;
         }
         .task-dl-btn:hover { background: #219653; }
+        .orient-btn {
+            background: #eef2f5; color: #333; border: 1px solid #ccc;
+            padding: 5px 12px; border-radius: 6px; cursor: pointer;
+            font-size: 0.85rem; font-weight: bold; transition: all 0.2s;
+        }
+        .orient-btn.active {
+            background: #e67e22; color: #fff; border-color: #d35400;
+        }
     </style>
 </head>
 <body>
@@ -595,8 +1016,16 @@ const indexHTML = `<!DOCTYPE html>
                 <label for="file" class="upload-btn" id="fileLabel">点击选择 PDF/MOBI/AZW3 (支持多选) ...</label>
                 <input type="file" id="file" name="file" accept=".pdf,.mobi,.azw3" multiple required>
             </div>
+            <div style="margin-bottom:0.8rem; text-align:center;">
+                <label style="font-size:0.9rem; font-weight:bold; color:#444; margin-right:8px;">导出屏幕方向 (Orientation):</label>
+                <div style="display:inline-flex; gap:6px;">
+                    <button type="button" id="orient0Btn" class="orient-btn" onclick="setOrientation(0)">0 (标准竖屏 480x800)</button>
+                    <button type="button" id="orient90Btn" class="orient-btn active" onclick="setOrientation(90)">90 (旋转横屏 480x800)</button>
+                </div>
+            </div>
             <button type="button" id="submitBtn">上传转换（不建议使用）</button>
-            <button type="button" id="submitSmartBtn">🔍 智能字体检测切分</button>
+            <button type="button" id="submitSmartBtn">🔍 智能字体检测切分 (导出 PDF)</button>
+            <button type="button" id="submitSmartXTCBtn">📱 智能切分并导出 XTC (旋转横屏 阅星曈X4)</button>
             <label style="display:inline-flex;align-items:center;gap:8px;margin-top:1rem;font-size:0.9rem;color:#555;cursor:pointer;">
                 <input type="checkbox" id="keepOriginal" style="width:16px;height:16px;cursor:pointer;">
                 保留切分前的原图
@@ -608,16 +1037,33 @@ const indexHTML = `<!DOCTYPE html>
         <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px dashed #e0e0e0; font-size: 0.9rem;">
             🚀 觉得网页慢？<a href="https://asukalay-1253207553.cos.ap-chengdu.myqcloud.com/xteink.exe" style="color: #3498db; text-decoration: none; font-weight: bold;">点击下载 Windows 桌面版</a> (处理速度更快，支持整个文件夹)
         </div>
+        <div style="margin-top: 0.6rem; font-size: 0.9rem; color: #e67e22;">
+            ⚡ 文件大于 100M？<a href="http://203.88.127.184:8090/" target="_blank" style="color: #e67e22; text-decoration: underline; font-weight: bold;">请点击这里上传</a>
+        </div>
     </div>
     <script>
         const fileInput = document.getElementById('file');
         const fileLabel = document.getElementById('fileLabel');
         const submitBtn = document.getElementById('submitBtn');
         const submitSmartBtn = document.getElementById('submitSmartBtn');
+        const submitSmartXTCBtn = document.getElementById('submitSmartXTCBtn');
         const keepOriginal = document.getElementById('keepOriginal');
         const statusDiv = document.getElementById('status');
         const taskListDiv = document.getElementById('taskList');
         const downloadAllBtn = document.getElementById('downloadAllBtn');
+
+        let currentOrientation = 90;
+        function setOrientation(val) {
+            currentOrientation = val;
+            document.getElementById('orient0Btn').className = 'orient-btn' + (val === 0 ? ' active' : '');
+            document.getElementById('orient90Btn').className = 'orient-btn' + (val === 90 ? ' active' : '');
+            const btn = document.getElementById('submitSmartXTCBtn');
+            if (val === 90) {
+                btn.innerText = '📱 智能切分并导出 XTC (旋转横屏 阅星曈X4)';
+            } else {
+                btn.innerText = '📱 智能切分并导出 XTC (标准竖屏 480x800 阅星曈X4)';
+            }
+        }
 
         let activeTasks = [];
         let activePollTimer = null;
@@ -651,6 +1097,7 @@ const indexHTML = `<!DOCTYPE html>
             const files = Array.from(fileInput.files);
             submitBtn.disabled = true;
             submitSmartBtn.disabled = true;
+            submitSmartXTCBtn.disabled = true;
             downloadAllBtn.style.display = 'none';
             statusDiv.style.display = 'block';
             statusDiv.innerHTML = '<span class="loading">⬆️ 正在上传文件至服务器...</span>';
@@ -666,6 +1113,7 @@ const indexHTML = `<!DOCTYPE html>
                 const formData = new FormData();
                 formData.append("file", file);
                 formData.append("keep_original", keepOriginal.checked ? "1" : "0");
+                formData.append("orientation", currentOrientation);
 
                 const rowId = 'task-row-' + i;
                 taskListDiv.innerHTML += '<div class="task-item" id="' + rowId + '">' +
@@ -684,6 +1132,7 @@ const indexHTML = `<!DOCTYPE html>
                         index: i,
                         taskId: taskId,
                         fileName: file.name,
+                        endpoint: endpoint,
                         status: 'processing'
                     });
                 } catch (err) {
@@ -702,6 +1151,7 @@ const indexHTML = `<!DOCTYPE html>
                 statusDiv.innerHTML = '<span class="error">❌ 所有文件上传失败</span>';
                 submitBtn.disabled = false;
                 submitSmartBtn.disabled = false;
+                submitSmartXTCBtn.disabled = false;
             }
         }
 
@@ -730,12 +1180,17 @@ const indexHTML = `<!DOCTYPE html>
                         let outName = task.fileName;
                         const lastDot = outName.lastIndexOf('.');
                         if(lastDot !== -1) { outName = outName.substring(0, lastDot); }
-                        outName += "_output.pdf";
+                        var isXTC = (data.out_file && data.out_file.endsWith('.xtc')) || task.endpoint === '/upload-smart-xtc';
+                        outName += isXTC ? ".xtc" : "_output.pdf";
 
                         const dlUrl = '/download?task_id=' + task.taskId + '&filename=' + encodeURIComponent(outName);
                         if (statusElem) {
                             statusElem.className = 'task-status success';
-                            statusElem.innerHTML = '<a class="task-dl-btn" href="' + dlUrl + '" target="_blank">📥 下载</a>';
+                            let html = '<a class="task-dl-btn" href="' + dlUrl + '" target="_blank">📥 下载 ' + (isXTC ? 'XTC' : 'PDF') + '</a>';
+                            if (isXTC) {
+                                html += ' <button class="task-dl-btn" style="background:#8e44ad; cursor:pointer;" onclick="openXtcPreview(\'' + dlUrl + '\', \'' + outName + '\')">👁️ 预览</button>';
+                            }
+                            statusElem.innerHTML = html;
                         }
                     } else if (data.status === 'error') {
                         task.status = 'error';
@@ -756,6 +1211,7 @@ const indexHTML = `<!DOCTYPE html>
                 clearInterval(activePollTimer);
                 submitBtn.disabled = false;
                 submitSmartBtn.disabled = false;
+                submitSmartXTCBtn.disabled = false;
 
                 if (doneCount > 0) {
                     statusDiv.innerHTML = '<span class="success">🎉 转换完成！(' + doneCount + '/' + activeTasks.length + ' 成功)</span>';
@@ -769,9 +1225,113 @@ const indexHTML = `<!DOCTYPE html>
             }
         }
 
+        let currentXtcData = null;
+        let currentXtcPage = 0;
+
+        async function openXtcPreview(url, fileName) {
+            const modal = document.getElementById('xtcModal');
+            document.getElementById('modalTitle').innerText = '👁️ 在线预览: ' + fileName;
+            modal.style.display = 'flex';
+
+            try {
+                const resp = await fetch(url);
+                const buffer = await resp.arrayBuffer();
+                parseXtcBuffer(buffer);
+                renderXtcPage(0);
+            } catch (err) {
+                alert('读取 XTC 渲染失败: ' + err.message);
+            }
+        }
+
+        function closeXtcModal() {
+            document.getElementById('xtcModal').style.display = 'none';
+        }
+
+        function parseXtcBuffer(buffer) {
+            const view = new DataView(buffer);
+            const bytes = new Uint8Array(buffer);
+            const pageCount = view.getUint16(6, true);
+            const indexOffset = Number(view.getBigUint64(24, true));
+
+            const pages = [];
+            let idxPos = indexOffset;
+            for (let i = 0; i < pageCount; i++) {
+                const pageOffset = Number(view.getBigUint64(idxPos, true));
+                const pageSize = view.getUint32(idxPos + 8, true);
+                const width = view.getUint16(idxPos + 12, true);
+                const height = view.getUint16(idxPos + 14, true);
+                pages.push({ offset: pageOffset, size: pageSize, width: width, height: height });
+                idxPos += 16;
+            }
+
+            currentXtcData = { bytes, pages, pageCount };
+            currentXtcPage = 0;
+        }
+
+        function renderXtcPage(pageNum) {
+            if (!currentXtcData || pageNum < 0 || pageNum >= currentXtcData.pageCount) return;
+            currentXtcPage = pageNum;
+
+            const page = currentXtcData.pages[pageNum];
+            const canvas = document.getElementById('xtcCanvas');
+            canvas.width = page.width;
+            canvas.height = page.height;
+            const ctx = canvas.getContext('2d');
+
+            const imageData = ctx.createImageData(page.width, page.height);
+            const data = imageData.data;
+            const bytes = currentXtcData.bytes;
+
+            const xtgHeaderSize = 22;
+            const bitmapOffset = page.offset + xtgHeaderSize;
+            const rowBytes = Math.ceil(page.width / 8);
+
+            for (let y = 0; y < page.height; y++) {
+                for (let x = 0; x < page.width; x++) {
+                    const byteIdx = bitmapOffset + y * rowBytes + Math.floor(x / 8);
+                    const bitIdx = 7 - (x % 8);
+                    const isWhite = (bytes[byteIdx] & (1 << bitIdx)) !== 0;
+
+                    const pxIdx = (y * page.width + x) * 4;
+                    const val = isWhite ? 255 : 0;
+                    data[pxIdx] = val;
+                    data[pxIdx + 1] = val;
+                    data[pxIdx + 2] = val;
+                    data[pxIdx + 3] = 255;
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            document.getElementById('pageCounter').innerText = '页码: ' + (pageNum + 1) + ' / ' + currentXtcData.pageCount;
+            document.getElementById('prevPageBtn').disabled = pageNum === 0;
+            document.getElementById('nextPageBtn').disabled = pageNum >= currentXtcData.pageCount - 1;
+        }
+
+        function changeXtcPage(delta) {
+            renderXtcPage(currentXtcPage + delta);
+        }
+
         submitBtn.addEventListener('click', async () => { uploadTo('/upload'); });
         submitSmartBtn.addEventListener('click', async () => { uploadTo('/upload-smart'); });
+        submitSmartXTCBtn.addEventListener('click', async () => { uploadTo('/upload-smart-xtc'); });
     </script>
+
+    <!-- XTC 预览 Modal -->
+    <div id="xtcModal" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.75); z-index:9999; justify-content:center; align-items:center;">
+        <div style="background:#fff; padding:20px; border-radius:12px; max-width:90vw; max-height:90vh; text-align:center; position:relative; overflow:auto; box-shadow:0 10px 25px rgba(0,0,0,0.5);">
+            <button onclick="closeXtcModal()" style="position:absolute; top:12px; right:16px; background:#e74c3c; color:#fff; border:none; border-radius:50%; width:32px; height:32px; font-weight:bold; cursor:pointer;">✕</button>
+            <h3 id="modalTitle" style="margin-top:0; margin-bottom:12px; font-size:1.1rem; color:#2c3e50;">XTC 在线预览</h3>
+            <div style="display:flex; justify-content:center; align-items:center; margin-bottom:12px;">
+                <canvas id="xtcCanvas" style="border:1px solid #ccc; max-width:80vw; max-height:65vh; box-shadow:0 4px 10px rgba(0,0,0,0.15);"></canvas>
+            </div>
+            <div style="display:flex; justify-content:center; align-items:center; gap:16px;">
+                <button id="prevPageBtn" onclick="changeXtcPage(-1)" style="padding:8px 18px; background:#3498db; color:#fff; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">◀ 上一页</button>
+                <span id="pageCounter" style="font-weight:bold; font-size:0.95rem; color:#444;">页码: 1 / 1</span>
+                <button id="nextPageBtn" onclick="changeXtcPage(1)" style="padding:8px 18px; background:#3498db; color:#fff; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">下一页 ▶</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 `
@@ -943,6 +1503,75 @@ func runWebServer(port string) {
 		json.NewEncoder(w).Encode(map[string]string{"task_id": taskId})
 	})
 
+	http.HandleFunc("/upload-smart-xtc", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		err := r.ParseMultipartForm(500 << 20)
+		if err != nil {
+			http.Error(w, "文件太大或解析错误", http.StatusBadRequest)
+			return
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "获取上传文件失败", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		keepOrig := r.FormValue("keep_original") == "1"
+		ext := strings.ToLower(filepath.Ext(header.Filename))
+		if ext != ".pdf" && ext != ".mobi" && ext != ".azw3" {
+			http.Error(w, "不支持的文件格式，仅支持 pdf, mobi, azw3", http.StatusBadRequest)
+			return
+		}
+		taskId := fmt.Sprintf("task_%d", time.Now().UnixNano())
+		taskDir := filepath.Join(webTasksDir, taskId)
+		os.MkdirAll(taskDir, 0755)
+		inputPath := filepath.Join(taskDir, header.Filename)
+		outPath := filepath.Join(taskDir, "output.xtc")
+
+		inFile, err := os.Create(inputPath)
+		if err != nil {
+			http.Error(w, "内部错误：文件保存失败", http.StatusInternalServerError)
+			return
+		}
+		io.Copy(inFile, file)
+		inFile.Close()
+
+		webTasksMutex.Lock()
+		webTasks[taskId] = &WebTask{
+			ID:        taskId,
+			Status:    "processing",
+			CreatedAt: time.Now(),
+			FileName:  header.Filename,
+			OutFile:   outPath,
+		}
+		webTasksMutex.Unlock()
+
+		orient, _ := strconv.Atoi(r.FormValue("orientation"))
+		fmt.Printf("\n[Web-Smart-XTC] 接收到任务 %s: %s (Orient=%d), 大小: %.2f MB\n", taskId, header.Filename, orient, float64(header.Size)/(1024*1024))
+		go func(id, in, out string, keepOrig bool, orient int) {
+			err := processSmartSplitToXTC(in, out, keepOrig, orient)
+			webTasksMutex.Lock()
+			if task, ok := webTasks[id]; ok {
+				if err != nil {
+					task.Status = "error"
+					task.ErrorMsg = err.Error()
+					fmt.Printf("[Web-Smart-XTC] 任务 %s 失败: %v\n", id, err)
+				} else {
+					task.Status = "done"
+					fmt.Printf("[Web-Smart-XTC] 任务 %s 成功完成！导出 XTC 格式文件。\n", id)
+					os.Remove(in)
+				}
+			}
+			webTasksMutex.Unlock()
+		}(taskId, inputPath, outPath, keepOrig, orient)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"task_id": taskId})
+	})
+
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		taskId := r.URL.Query().Get("task_id")
 		webTasksMutex.Lock()
@@ -958,15 +1587,13 @@ func runWebServer(port string) {
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":    task.Status,
 			"error_msg": task.ErrorMsg,
+			"out_file":  filepath.Base(task.OutFile),
 		})
 	})
 
 	http.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
 		taskId := r.URL.Query().Get("task_id")
 		filename := r.URL.Query().Get("filename")
-		if filename == "" {
-			filename = "output.pdf"
-		}
 
 		webTasksMutex.Lock()
 		task, ok := webTasks[taskId]
@@ -977,8 +1604,16 @@ func runWebServer(port string) {
 			return
 		}
 
+		if filename == "" {
+			filename = filepath.Base(task.OutFile)
+		}
+
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-		w.Header().Set("Content-Type", "application/pdf")
+		if strings.HasSuffix(strings.ToLower(task.OutFile), ".xtc") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+		} else {
+			w.Header().Set("Content-Type", "application/pdf")
+		}
 		http.ServeFile(w, r, task.OutFile)
 	})
 
@@ -1017,7 +1652,8 @@ func runWebServer(port string) {
 
 			ext := filepath.Ext(task.FileName)
 			baseName := strings.TrimSuffix(task.FileName, ext)
-			zipEntryName := baseName + "_output.pdf"
+			outExt := filepath.Ext(task.OutFile)
+			zipEntryName := baseName + "_output" + outExt
 
 			wFile, err := zipWriter.Create(zipEntryName)
 			if err != nil {
