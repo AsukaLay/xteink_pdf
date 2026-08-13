@@ -8,6 +8,7 @@ pdf动漫切割更细方便xteink阅星曈X4,阅星曈X3阅读
 新增mobi azw3格式
 
 GOOS=windows GOARCH=amd64 go build -o xteink.exe
+
 linux go build 命令:
 GOOS=linux GOARCH=amd64 go build -o xteink
 

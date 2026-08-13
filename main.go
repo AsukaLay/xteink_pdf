@@ -488,9 +488,31 @@ func buildXTCContainer(xtgPages [][]byte, title string, width, height int, orien
 	return buf
 }
 
+// devicePreset 定义目标设备的分辨率预设。底部 20px 用作页码状态栏。
+// X4 = 480x800，X3 = 528x792。
+type devicePreset struct {
+	Name          string
+	Width         int
+	Height        int
+	ContentHeight int
+}
+
+var devicePresets = map[string]devicePreset{
+	"x4": {Name: "阅星曈X4", Width: 480, Height: 800, ContentHeight: 780},
+	"x3": {Name: "阅星曈X3", Width: 528, Height: 792, ContentHeight: 772},
+}
+
+func resolveDevice(key string) devicePreset {
+	if p, ok := devicePresets[key]; ok {
+		return p
+	}
+	return devicePresets["x4"]
+}
+
 // processSmartSplitToXTC extracts images, splits them intelligently,
-// and encodes into Xteink X4 standard XTC format (480x800, 1-bit Dither, Status Bar).
-func processSmartSplitToXTC(inputFile, outputXTC string, keepOriginal bool, orient int) error {
+// and encodes into Xteink XTC format (1-bit Dither, Status Bar).
+// device: "x4" (480x800) 或 "x3" (528x792)。
+func processSmartSplitToXTC(inputFile, outputXTC string, keepOriginal bool, orient int, device string) error {
 	tempRaw, err := os.MkdirTemp("", "temp_raw_*")
 	if err != nil {
 		return fmt.Errorf("创建临时目录失败: %v", err)
@@ -602,11 +624,12 @@ func processSmartSplitToXTC(inputFile, outputXTC string, keepOriginal bool, orie
 	}
 	sort.Strings(finalImgs)
 
-	targetWidth := 480
-	targetHeight := 800
-	contentHeight := 780
+	preset := resolveDevice(device)
+	targetWidth := preset.Width
+	targetHeight := preset.Height
+	contentHeight := preset.ContentHeight
 
-	fmt.Printf("[XTC] Step 3: 正在转为 Xteink X4 XTC 格式 (自适应 480x800, Orient=%d, 1-bit Dither, 状态栏)...\n", orient)
+	fmt.Printf("[XTC] Step 3: 正在转为 %s XTC 格式 (%dx%d, Orient=%d, 1-bit Dither, 状态栏)...\n", preset.Name, targetWidth, targetHeight, orient)
 
 	var xtgPages [][]byte
 	total := len(finalImgs)
@@ -699,9 +722,9 @@ func processSmartSplitToXTC(inputFile, outputXTC string, keepOriginal bool, orie
 		return fmt.Errorf("写入 XTC 文件失败: %v", err)
 	}
 
-	orientation := "标准竖屏 480x800"
+	orientation := fmt.Sprintf("标准竖屏 %dx%d", targetWidth, targetHeight)
 	if orient == 90 || orient == 270 {
-		orientation = "自适应旋转横屏 480x800"
+		orientation = fmt.Sprintf("自适应旋转横屏 %dx%d", targetWidth, targetHeight)
 	}
 	fmt.Printf("[XTC] 转换完成！已导出 %s XTC 文件: %s (共 %d 页)\n", orientation, outputXTC, len(xtgPages))
 	return nil
@@ -1017,15 +1040,22 @@ const indexHTML = `<!DOCTYPE html>
                 <input type="file" id="file" name="file" accept=".pdf,.mobi,.azw3" multiple required>
             </div>
             <div style="margin-bottom:0.8rem; text-align:center;">
+                <label style="font-size:0.9rem; font-weight:bold; color:#444; margin-right:8px;">目标设备 (Device):</label>
+                <div style="display:inline-flex; gap:6px;">
+                    <button type="button" id="deviceX4Btn" class="orient-btn active" onclick="setDevice('x4')">X4 (480x800)</button>
+                    <button type="button" id="deviceX3Btn" class="orient-btn" onclick="setDevice('x3')">X3 (528x792)</button>
+                </div>
+            </div>
+            <div style="margin-bottom:0.8rem; text-align:center;">
                 <label style="font-size:0.9rem; font-weight:bold; color:#444; margin-right:8px;">导出屏幕方向 (Orientation):</label>
                 <div style="display:inline-flex; gap:6px;">
-                    <button type="button" id="orient0Btn" class="orient-btn" onclick="setOrientation(0)">0 (标准竖屏 480x800)</button>
-                    <button type="button" id="orient90Btn" class="orient-btn active" onclick="setOrientation(90)">90 (旋转横屏 480x800)</button>
+                    <button type="button" id="orient0Btn" class="orient-btn" onclick="setOrientation(0)">0 (标准竖屏)</button>
+                    <button type="button" id="orient90Btn" class="orient-btn active" onclick="setOrientation(90)">90 (旋转横屏)</button>
                 </div>
             </div>
             <button type="button" id="submitBtn">上传转换（不建议使用）</button>
             <button type="button" id="submitSmartBtn">🔍 智能字体检测切分 (导出 PDF)</button>
-            <button type="button" id="submitSmartXTCBtn">📱 智能切分并导出 XTC (旋转横屏 阅星曈X4)</button>
+            <button type="button" id="submitSmartXTCBtn">📱 智能切分并导出 XTC (旋转横屏 阅星曈X4 480x800)</button>
             <label style="display:inline-flex;align-items:center;gap:8px;margin-top:1rem;font-size:0.9rem;color:#555;cursor:pointer;">
                 <input type="checkbox" id="keepOriginal" style="width:16px;height:16px;cursor:pointer;">
                 保留切分前的原图
@@ -1053,16 +1083,26 @@ const indexHTML = `<!DOCTYPE html>
         const downloadAllBtn = document.getElementById('downloadAllBtn');
 
         let currentOrientation = 90;
+        let currentDevice = 'x4';
+
+        function updateXtcBtnText() {
+            const btn = document.getElementById('submitSmartXTCBtn');
+            const dev = currentDevice === 'x3' ? '阅星曈X3 528x792' : '阅星曈X4 480x800';
+            btn.innerText = '📱 智能切分并导出 XTC (' + (currentOrientation === 90 ? '旋转横屏 ' : '标准竖屏 ') + dev + ')';
+        }
+
         function setOrientation(val) {
             currentOrientation = val;
             document.getElementById('orient0Btn').className = 'orient-btn' + (val === 0 ? ' active' : '');
             document.getElementById('orient90Btn').className = 'orient-btn' + (val === 90 ? ' active' : '');
-            const btn = document.getElementById('submitSmartXTCBtn');
-            if (val === 90) {
-                btn.innerText = '📱 智能切分并导出 XTC (旋转横屏 阅星曈X4)';
-            } else {
-                btn.innerText = '📱 智能切分并导出 XTC (标准竖屏 480x800 阅星曈X4)';
-            }
+            updateXtcBtnText();
+        }
+
+        function setDevice(val) {
+            currentDevice = val;
+            document.getElementById('deviceX4Btn').className = 'orient-btn' + (val === 'x4' ? ' active' : '');
+            document.getElementById('deviceX3Btn').className = 'orient-btn' + (val === 'x3' ? ' active' : '');
+            updateXtcBtnText();
         }
 
         let activeTasks = [];
@@ -1114,6 +1154,7 @@ const indexHTML = `<!DOCTYPE html>
                 formData.append("file", file);
                 formData.append("keep_original", keepOriginal.checked ? "1" : "0");
                 formData.append("orientation", currentOrientation);
+                formData.append("device", currentDevice);
 
                 const rowId = 'task-row-' + i;
                 taskListDiv.innerHTML += '<div class="task-item" id="' + rowId + '">' +
@@ -1550,9 +1591,13 @@ func runWebServer(port string) {
 		webTasksMutex.Unlock()
 
 		orient, _ := strconv.Atoi(r.FormValue("orientation"))
-		fmt.Printf("\n[Web-Smart-XTC] 接收到任务 %s: %s (Orient=%d), 大小: %.2f MB\n", taskId, header.Filename, orient, float64(header.Size)/(1024*1024))
-		go func(id, in, out string, keepOrig bool, orient int) {
-			err := processSmartSplitToXTC(in, out, keepOrig, orient)
+		device := r.FormValue("device")
+		if device == "" {
+			device = "x4"
+		}
+		fmt.Printf("\n[Web-Smart-XTC] 接收到任务 %s: %s (Device=%s, Orient=%d), 大小: %.2f MB\n", taskId, header.Filename, device, orient, float64(header.Size)/(1024*1024))
+		go func(id, in, out string, keepOrig bool, orient int, device string) {
+			err := processSmartSplitToXTC(in, out, keepOrig, orient, device)
 			webTasksMutex.Lock()
 			if task, ok := webTasks[id]; ok {
 				if err != nil {
@@ -1566,7 +1611,7 @@ func runWebServer(port string) {
 				}
 			}
 			webTasksMutex.Unlock()
-		}(taskId, inputPath, outPath, keepOrig, orient)
+		}(taskId, inputPath, outPath, keepOrig, orient, device)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"task_id": taskId})
