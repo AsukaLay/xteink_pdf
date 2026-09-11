@@ -3,7 +3,7 @@ Ai生成了一个细分pdf
 
 下载 exe 后，将 pdf/mobi/azw3 文件和执行文件 exe 放在同一个目录运行  
 双击会默认开启智能切割，将长图自动分割为小图片，完成后生成 `_output.pdf`。再导入 output 的文件就可以看清字了。
-pdf动漫切割更细方便xteink阅星曈X4,阅星曈X3阅读
+pdf动漫切割更细方便xteink阅星曈X4,阅星曈X3,eeGo A4阅读
 
 新增mobi azw3格式
 

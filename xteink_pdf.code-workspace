@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../epub-to-xtc-converter"
+		}
+	],
+	"settings": {}
+}

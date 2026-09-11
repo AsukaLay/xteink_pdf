@@ -489,7 +489,7 @@ func buildXTCContainer(xtgPages [][]byte, title string, width, height int, orien
 }
 
 // devicePreset 定义目标设备的分辨率预设。底部 20px 用作页码状态栏。
-// X4 = 480x800，X3 = 528x792。
+// X4 = 480x800，X3 = 528x792，eego = 552x768。
 type devicePreset struct {
 	Name          string
 	Width         int
@@ -498,11 +498,15 @@ type devicePreset struct {
 }
 
 var devicePresets = map[string]devicePreset{
-	"x4": {Name: "阅星曈X4", Width: 480, Height: 800, ContentHeight: 780},
-	"x3": {Name: "阅星曈X3", Width: 528, Height: 792, ContentHeight: 772},
+	"x4":      {Name: "阅星曈X4", Width: 480, Height: 800, ContentHeight: 780},
+	"x3":      {Name: "阅星曈X3", Width: 528, Height: 792, ContentHeight: 772},
+	"eego":    {Name: "eego", Width: 552, Height: 768, ContentHeight: 748},
+	"eego_a4": {Name: "eego", Width: 552, Height: 768, ContentHeight: 748},
+	"a4":      {Name: "eego", Width: 552, Height: 768, ContentHeight: 748},
 }
 
 func resolveDevice(key string) devicePreset {
+	key = strings.ToLower(strings.TrimSpace(key))
 	if p, ok := devicePresets[key]; ok {
 		return p
 	}
@@ -511,7 +515,7 @@ func resolveDevice(key string) devicePreset {
 
 // processSmartSplitToXTC extracts images, splits them intelligently,
 // and encodes into Xteink XTC format (1-bit Dither, Status Bar).
-// device: "x4" (480x800) 或 "x3" (528x792)。
+// device: "x4" (480x800)、"x3" (528x792) 或 "eego_a4" (552x768)。
 func processSmartSplitToXTC(inputFile, outputXTC string, keepOriginal bool, orient int, device string) error {
 	tempRaw, err := os.MkdirTemp("", "temp_raw_*")
 	if err != nil {
@@ -942,10 +946,10 @@ const indexHTML = `<!DOCTYPE html>
         }
         .card { 
             background: rgba(255, 255, 255, 0.95); 
-            padding: 2.5rem 2rem; 
+            padding: 2.5rem 1.8rem; 
             border-radius: 16px; 
             box-shadow: 0 10px 30px rgba(0,0,0,0.1); 
-            text-align: center; width: 90%; max-width: 480px; 
+            text-align: center; width: 90%; max-width: 540px; 
             backdrop-filter: blur(10px);
         }
         h2 { margin-top: 0; color: #2c3e50; font-size: 1.6rem; margin-bottom: 1.5rem; }
@@ -1023,8 +1027,9 @@ const indexHTML = `<!DOCTYPE html>
         .task-dl-btn:hover { background: #219653; }
         .orient-btn {
             background: #eef2f5; color: #333; border: 1px solid #ccc;
-            padding: 5px 12px; border-radius: 6px; cursor: pointer;
+            padding: 5px 9px; border-radius: 6px; cursor: pointer;
             font-size: 0.85rem; font-weight: bold; transition: all 0.2s;
+            white-space: nowrap;
         }
         .orient-btn.active {
             background: #e67e22; color: #fff; border-color: #d35400;
@@ -1041,9 +1046,10 @@ const indexHTML = `<!DOCTYPE html>
             </div>
             <div style="margin-bottom:0.8rem; text-align:center;">
                 <label style="font-size:0.9rem; font-weight:bold; color:#444; margin-right:8px;">目标设备 (Device):</label>
-                <div style="display:inline-flex; gap:6px;">
+                <div style="display:inline-flex; gap:6px; flex-wrap:wrap; justify-content:center;">
                     <button type="button" id="deviceX4Btn" class="orient-btn active" onclick="setDevice('x4')">X4 (480x800)</button>
                     <button type="button" id="deviceX3Btn" class="orient-btn" onclick="setDevice('x3')">X3 (528x792)</button>
+                    <button type="button" id="deviceEegoBtn" class="orient-btn" onclick="setDevice('eego')">eego (552x768)</button>
                 </div>
             </div>
             <div style="margin-bottom:0.8rem; text-align:center;">
@@ -1087,7 +1093,12 @@ const indexHTML = `<!DOCTYPE html>
 
         function updateXtcBtnText() {
             const btn = document.getElementById('submitSmartXTCBtn');
-            const dev = currentDevice === 'x3' ? '阅星曈X3 528x792' : '阅星曈X4 480x800';
+            let dev = '阅星曈X4 480x800';
+            if (currentDevice === 'x3') {
+                dev = '阅星曈X3 528x792';
+            } else if (currentDevice === 'eego' || currentDevice === 'eego_a4' || currentDevice === 'a4') {
+                dev = 'eego 552x768';
+            }
             btn.innerText = '📱 智能切分并导出 XTC (' + (currentOrientation === 90 ? '旋转横屏 ' : '标准竖屏 ') + dev + ')';
         }
 
@@ -1102,6 +1113,10 @@ const indexHTML = `<!DOCTYPE html>
             currentDevice = val;
             document.getElementById('deviceX4Btn').className = 'orient-btn' + (val === 'x4' ? ' active' : '');
             document.getElementById('deviceX3Btn').className = 'orient-btn' + (val === 'x3' ? ' active' : '');
+            const eegoBtn = document.getElementById('deviceEegoBtn');
+            if (eegoBtn) {
+                eegoBtn.className = 'orient-btn' + ((val === 'eego' || val === 'eego_a4' || val === 'a4') ? ' active' : '');
+            }
             updateXtcBtnText();
         }
 
